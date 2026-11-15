@@ -1,0 +1,24 @@
+{
+  "name": "local-agent-chat",
+  "displayName": "Local Agent Chat",
+  "description": "Read-only chat with the sandboxed local Ollama agent. Talks only to 127.0.0.1:11434.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "extensionKind": ["workspace"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "localAgent.openChat", "title": "Local Agent: Open Chat" },
+      { "command": "localAgent.reviewStaged", "title": "Local Agent: Review Staged Changes" },
+      { "command": "localAgent.documentSelection", "title": "Local Agent: Suggest Docs for Selection" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "localAgent.documentSelection", "when": "editorHasSelection", "group": "localAgent" }
+      ]
+    }
+  }
+}

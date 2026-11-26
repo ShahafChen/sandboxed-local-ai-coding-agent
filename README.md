@@ -1,16 +1,29 @@
 # Sandboxed local AI coding agent
 
-A single Docker dev container that runs a local [Ollama](https://ollama.com) with a Qwen, Gemma or Devstral
-model, for **pre-commit review** against your own rules and past PR comments (the things ruff can't check) and
-for **general code review** (clarity, organization, comments, docstrings). The container can't reach the
-internet: a default-deny firewall lets out only pypi, through an allowlisting proxy. You connect to it from VS
-Code over SSH; a tiny, auditable extension shows the model's suggestions as a VS Code diff and writes nothing
-until you click Apply.
+An AI coding assistant that runs **entirely on your machine, inside a sandbox that cannot talk to the
+internet**. Your code, your review rules and the model's output never leave the container. It is a single
+Docker dev container: a local [Ollama](https://ollama.com) with a Qwen, Gemma or Devstral model, an SSH
+server for VS Code, and a firewall that is the whole point of the project.
+
+## Goals
+
+1. **Local assistant, not a cloud service.** The model runs on CPU inside the container; the weights are baked
+   into the image at build time. No API key, no account, no telemetry, nothing to subscribe to.
+2. **Sandboxed by construction.** The container is default-deny for outbound traffic. The only exception is
+   pypi, through a proxy that only knows two hostnames, so Python packages can still be installed. Everything
+   else — the model, the review script, the VS Code extension, anything you `pip install` — is cut off from the
+   network, and the user you log in as cannot lift that restriction. [The sandbox](#the-sandbox) below explains
+   each layer and how to verify it.
+3. **Assist, never act.** The agent reviews code against your team's rules and past PR comments (the things ruff
+   can't check) and suggests clarity, organization and documentation improvements. It shows every suggestion
+   as a VS Code diff and writes nothing to your files until you click Apply. It never commits, never pushes,
+   never runs in the background.
 
 ```
- your Mac ── ssh :2222 ──► container ── 127.0.0.1:11434 ──► ollama (model baked into the image)
-                             │
-                             └─ egress: iptables DROP, except tinyproxy ─► pypi.org, files.pythonhosted.org
+ your Mac ── ssh 127.0.0.1:2222 ──► container ── 127.0.0.1:11434 ──► ollama (model baked into the image)
+                                      │
+                                      └─ egress: iptables DROP for everyone,
+                                         except the proxy user ─► tinyproxy ─► pypi.org, files.pythonhosted.org
 ```
 
 ## Quick start
@@ -31,11 +44,8 @@ families (best for, pros, cons, resources). The model is pulled **at build time*
 firewall blocks the Ollama registry. To change the model, rebuild. `OLLAMA_CONTEXT_LENGTH` (default 8192)
 can be raised in the environment if you have RAM to spare.
 
-Check the sandbox (expects pypi allowed, everything else blocked):
-
-```bash
-docker compose exec -u dev agent test-firewall.sh
-```
+Then verify the sandbox: `docker compose exec -u dev agent test-firewall.sh` (see
+[Verify it yourself](#verify-it-yourself)).
 
 ## Connect VS Code
 
@@ -116,25 +126,92 @@ printf '#!/bin/sh\nagent-review || true\n' > .git/hooks/pre-commit && chmod +x .
 CLI: `agent-review` reviews staged changes. `agent-review --rev origin/dev..HEAD` reviews a range.
 `agent-review --rewrite FILE --mode rules|general` prints the rewritten file (what the tab diffs).
 
-## Security model
+## The sandbox
 
-- **Egress.** iptables in the container sets `OUTPUT` to DROP. Only the `tinyproxy` user may connect out, only
-  on 443. tinyproxy only forwards to the hosts in [`config/allowlist`](config/allowlist). To allow more, add a
-  regex line there and rebuild. Filtering by domain works where filtering by IP can't: pypi sits behind a
-  shared CDN.
-- **DNS.** The dev user can't resolve names at all, which closes DNS exfiltration. Only the proxy can query
-  Docker's resolver, and only root can do upstream DNS (that is what Docker's embedded resolver forwards as).
-- **Privileges.** The container gets `NET_ADMIN` only to install the firewall at startup. The dev user is not
-  root and has no sudo, so it can't change the firewall. `no-new-privileges` is set. If the firewall fails to
-  install, the container exits before sshd starts.
-- **SSH.** Key-only, `dev` user only, bound to `127.0.0.1:2222` on the host. Remote (`-R`) forwarding is
-  disabled, because it would give the container a path out through your Mac. Local forwarding stays on because
-  VS Code needs it.
-- **Ollama** listens on `127.0.0.1` inside the container and isn't published.
+The threat we defend against: *something inside the container tries to send your code, or anything else,
+to the internet.* "Something" is the model, the review script, the extension, a package installed from pypi,
+or a malicious prompt that talks any of them into it. The defence is layered: each layer is independent, and
+the one you log in as can't change any of them.
 
-Known limits:
+### Layer 1: the firewall (iptables, [`scripts/firewall.sh`](scripts/firewall.sh))
 
-- Root processes in the container (sshd, ollama) can do upstream DNS.
-- Anything installed from pypi runs inside the sandbox. It can't phone home, but it can read `/workspace`.
-- The workspace mount is read-write: commit from inside the container or on the host, as you prefer. Pushing
-  must happen on the host.
+Installed by the entrypoint before anything else starts. If it fails to install, the container exits and sshd
+never comes up: a broken firewall means no container, not an open one.
+
+- **Default deny.** `INPUT`, `FORWARD` and `OUTPUT` chains all have policy `DROP`. Inbound allows only loopback,
+  established connections and port 22. Outbound allows only loopback, established connections, and one
+  exception below.
+- **Egress is tied to a Linux user, not to a port.** The single outbound rule is
+  `--uid-owner tinyproxy --dport 443 ACCEPT`. Processes running as `dev` (you, VS Code, the model, pip, anything
+  you install) have no rule that matches them, so every packet they send to the outside is dropped. Even a
+  process that knows the proxy's upstream address can't bypass the proxy, because it is not the proxy user.
+- **DNS is closed too.** Resolving a name is itself an exfiltration channel (`secret.attacker.com`), so the
+  rules allow DNS only for the proxy user and for root. Docker's embedded resolver at `127.0.0.11` is also
+  blocked for everyone else. As `dev`, `getent hosts example.com` fails.
+- **IPv6** is dropped except loopback, so there is no second stack to leak through.
+
+### Layer 2: the allowlisting proxy (tinyproxy, [`config/tinyproxy.conf`](config/tinyproxy.conf))
+
+The firewall says *who* may go out (one user); the proxy says *where*. tinyproxy listens on `127.0.0.1:8888`,
+`FilterDefaultDeny Yes`, and only forwards `CONNECT` on port 443 to hostnames matching
+[`config/allowlist`](config/allowlist):
+
+```
+^pypi\.org$
+^files\.pythonhosted\.org$
+```
+
+`/etc/pip.conf` points pip at the proxy, so `pip install` works and nothing else does. Filtering by hostname
+is deliberate: pypi sits behind a shared CDN, so allowing its IP addresses would allow thousands of other
+sites on the same CDN. To allow another host, add a regex line and rebuild; keep the list short and read it
+as "the complete list of places this container can reach".
+
+### Layer 3: privileges
+
+- The container needs `NET_ADMIN` only for the firewall script, which runs as root at startup. You log in as
+  `dev`: not root, no sudo installed, so `iptables` says "permission denied" and the rules cannot be changed
+  from inside a session.
+- `no-new-privileges` is set, so no binary can gain capabilities through setuid.
+- Memory is capped (`MEM_LIMIT`), so a runaway model is contained too.
+
+### Layer 4: SSH ([`config/sshd.conf`](config/sshd.conf))
+
+SSH is the only door in, and it is shaped so it can't become a door out:
+
+- Key-only, user `dev` only, published on `127.0.0.1:2222` so nothing else on your network can reach it.
+- **Remote port forwarding (`-R`) is disabled.** With it, a process in the container could open a listener on
+  your Mac and tunnel through your Mac's internet access, defeating every layer above. Local forwarding (`-L`)
+  stays on because VS Code Remote-SSH needs it, and it only lets your Mac reach into the container, not the
+  reverse.
+- No agent forwarding, no X11, no tunnels, no gateway ports.
+
+### Layer 5: the model and the tooling have no network code
+
+Ollama listens on `127.0.0.1:11434` inside the container and is not published. The review script talks to it
+over loopback with the standard library and nothing else. The VS Code extension runs on the remote side and
+contains **no network code at all**: it runs the review script and shows the result;
+[`scripts/audit-extension.sh`](scripts/audit-extension.sh) fails if that ever changes. The model weights are
+pulled at build time, so at runtime there is nothing left that *needs* the internet.
+
+### Verify it yourself
+
+```bash
+docker compose exec -u dev agent test-firewall.sh
+```
+
+It must print `ok` for all eight checks: pypi reachable through the proxy, `pip download` works, Ollama
+answers on loopback, and example.com, github.com, pypi without the proxy, a raw IP, and a DNS lookup are all
+blocked. Run it after every rebuild and after any change to the firewall or the allowlist. For a second
+opinion, `docker compose exec agent iptables -L OUTPUT -v -n` shows the rules and their packet counters.
+
+### What the sandbox does not do
+
+- Root processes in the container (sshd, Ollama) can do upstream DNS. They have no reason to, but the
+  firewall doesn't stop them.
+- Packages installed from pypi run inside the sandbox: they can't phone home, but they can read `/workspace`.
+  Pin what you install.
+- The workspace mount is read-write by design, so the agent's suggestions can be applied. Commit inside the
+  container or on the host as you prefer; pushing has to happen on the host, because the container can't
+  reach your git remote.
+- It is a container, not a VM. A kernel escape would bypass all of this. If that is in your threat model, run
+  the container inside a VM.

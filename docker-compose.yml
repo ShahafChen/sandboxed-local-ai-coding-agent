@@ -3,14 +3,16 @@ services:
     build:
       context: .
       args:
+        MODEL_FAMILY: ${MODEL_FAMILY:-qwen}
         MODEL_PROFILE: ${MODEL_PROFILE:-8gb}
         OLLAMA_MODEL: ${OLLAMA_MODEL:-}
-    image: local-ai-agent:${MODEL_PROFILE:-8gb}
+    image: local-ai-agent:${MODEL_FAMILY:-qwen}-${MODEL_PROFILE:-8gb}
     mem_limit: ${MEM_LIMIT:-8g}
     cap_add: [NET_ADMIN]  # for the firewall only; the dev user never holds it
     security_opt: ["no-new-privileges:true"]
     environment:
       SSH_PUBKEY: ${SSH_PUBKEY:?export SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"}
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
     ports:
       - "127.0.0.1:${SSH_PORT:-2222}:22"
     volumes:

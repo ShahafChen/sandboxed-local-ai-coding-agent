@@ -1,6 +1,7 @@
 FROM ollama/ollama:0.40.15
 
-# 8gb -> qwen2.5-coder:7b (~4.7GB), 16gb -> qwen2.5-coder:14b (~9GB). OLLAMA_MODEL overrides both.
+# Model = config/models[MODEL_FAMILY, MODEL_PROFILE]; OLLAMA_MODEL overrides with any Ollama tag.
+ARG MODEL_FAMILY=qwen
 ARG MODEL_PROFILE=8gb
 ARG OLLAMA_MODEL=
 
@@ -9,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # The model is baked in at build time: at runtime the firewall blocks the Ollama registry.
-RUN MODEL="${OLLAMA_MODEL:-$([ "$MODEL_PROFILE" = 16gb ] && echo qwen2.5-coder:14b || echo qwen2.5-coder:7b)}" \
+COPY config/models /etc/agent-models
+RUN MODEL="${OLLAMA_MODEL:-$(awk -v k="$MODEL_FAMILY $MODEL_PROFILE" '$1" "$2==k{print $3}' /etc/agent-models)}" \
+    && { [ -n "$MODEL" ] || { echo "no model for MODEL_FAMILY=$MODEL_FAMILY MODEL_PROFILE=$MODEL_PROFILE; see config/models" >&2; exit 1; }; } \
     && echo "$MODEL" > /etc/agent-model \
     && (OLLAMA_HOST=127.0.0.1:11434 ollama serve >/dev/null 2>&1 &) \
     && for i in $(seq 30); do ollama list >/dev/null 2>&1 && break; sleep 1; done \

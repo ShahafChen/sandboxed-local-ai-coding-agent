@@ -1,10 +1,11 @@
 # Sandboxed local AI coding agent
 
-A single Docker dev container that runs a local [Ollama](https://ollama.com) with a Qwen coder model, for
-**pre-commit review** against your own rules and past PR comments (the things ruff can't check) and for
-**documentation suggestions**. The container can't reach the internet: a default-deny firewall lets out only
-pypi, through an allowlisting proxy. You connect to it from VS Code over SSH and chat through a tiny, auditable
-extension that only shows suggestions and never edits your files.
+A single Docker dev container that runs a local [Ollama](https://ollama.com) with a Qwen, Gemma or Devstral
+model, for **pre-commit review** against your own rules and past PR comments (the things ruff can't check) and
+for **general code review** (clarity, organization, comments, docstrings). The container can't reach the
+internet: a default-deny firewall lets out only pypi, through an allowlisting proxy. You connect to it from VS
+Code over SSH; a tiny, auditable extension shows the model's suggestions as a VS Code diff and writes nothing
+until you click Apply.
 
 ```
  your Mac ── ssh :2222 ──► container ── 127.0.0.1:11434 ──► ollama (model baked into the image)
@@ -17,13 +18,18 @@ extension that only shows suggestions and never edits your files.
 ```bash
 export SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"
 export WORKSPACE=~/code            # host folder mounted at /workspace
-MODEL_PROFILE=8gb  MEM_LIMIT=8g  docker compose up -d --build    # qwen2.5-coder:7b  (~4.7 GB)
-MODEL_PROFILE=16gb MEM_LIMIT=16g docker compose up -d --build    # qwen2.5-coder:14b (~9 GB)
-OLLAMA_MODEL=qwen3:8b docker compose up -d --build               # any other Ollama tag
+MODEL_FAMILY=qwen     MODEL_PROFILE=8gb  MEM_LIMIT=8g  docker compose up -d --build   # qwen2.5-coder:7b (default)
+MODEL_FAMILY=qwen     MODEL_PROFILE=16gb MEM_LIMIT=16g docker compose up -d --build   # qwen2.5-coder:14b
+MODEL_FAMILY=gemma    MODEL_PROFILE=8gb  MEM_LIMIT=8g  docker compose up -d --build   # gemma3:4b
+MODEL_FAMILY=gemma    MODEL_PROFILE=16gb MEM_LIMIT=16g docker compose up -d --build   # gemma3:12b
+MODEL_FAMILY=devstral MODEL_PROFILE=16gb MEM_LIMIT=20g docker compose up -d --build   # devstral-small-2:24b (16gb only)
+OLLAMA_MODEL=qwen3:8b docker compose up -d --build                                     # any other Ollama tag
 ```
 
-The model is pulled **at build time**, because at runtime the firewall blocks the Ollama registry. To change
-the model, rebuild.
+The table lives in [`config/models`](config/models); [`docs/models.md`](docs/models.md) compares the three
+families (best for, pros, cons, resources). The model is pulled **at build time**, because at runtime the
+firewall blocks the Ollama registry. To change the model, rebuild. `OLLAMA_CONTEXT_LENGTH` (default 8192)
+can be raised in the environment if you have RAM to spare.
 
 Check the sandbox (expects pypi allowed, everything else blocked):
 
@@ -56,29 +62,35 @@ Then run **Remote-SSH: Connect to Host… → local-agent** and open `/workspace
 
 ## The extension
 
-The source is two files in [`extension/`](extension), about 150 lines with no dependencies. The image packs it
-into `/opt/agent/local-agent-chat.vsix`. Install it once, from the remote window's terminal:
+The source is two files in [`extension/`](extension), about 120 lines with no dependencies and **no network
+code at all**: it runs `/opt/agent/review.py` and shows the output. The image packs it into
+`/opt/agent/local-agent-chat.vsix`. Install it once, from the remote window's terminal:
 
 ```bash
 code --install-extension /opt/agent/local-agent-chat.vsix
 ```
 
-Commands (Cmd+Shift+P):
+**Local Agent: Open** (Cmd+Shift+P) opens a tab with two buttons. Both act on the file you last clicked into,
+run only when clicked (nothing runs in the background), and open the result as a VS Code diff, current file on
+the left, suggestions on the right, like a git diff:
 
-- **Local Agent: Open Chat**: a free-form chat with the model.
-- **Local Agent: Review Staged Changes**: runs `agent-review` on the `git diff --cached` of the open folder.
-- **Local Agent: Suggest Docs for Selection**: also in the editor's right-click menu.
+- **CR against team rules**: fixes violations of `.agent/rules.md` and past PR comments. Each change carries a
+  `CR: <rule> - <why>` comment so you can see which rule triggered it.
+- **General CR**: the model's own suggestions, not tied to the rules: clearer names, organization, comments
+  that explain why, docstrings.
 
-All output is plain text in a side panel. Nothing is inserted into your files.
+Nothing touches your file until you click **Apply suggestions to file** in the tab; **Discard** drops them. The
+file is saved before the review, and the rewrite needs the file twice in the model context, so files over
+~12k characters are refused (raise `OLLAMA_CONTEXT_LENGTH` and `MAX_FILE_CHARS` in `review.py` if needed).
 
 **Audit it.** `scripts/audit-extension.sh` fails if the extension gains a file, a dependency, a new `require`, a
-URL, or a network call other than the single loopback `http.request` to `127.0.0.1:11434`. The webview's CSP has
-no `connect-src`, so the webview can't make requests either. The extension runs on the remote
-(`extensionKind: workspace`), so even a bug would hit the container firewall.
+URL, any network-looking code, or a second subprocess. The webview's CSP has no `connect-src`, so the webview
+can't make requests either. The extension runs on the remote (`extensionKind: workspace`), so even a bug would
+hit the container firewall.
 
 ## Rules and past PR comments
 
-`agent-review` (the same script the extension runs) reads, from the repo root:
+`agent-review` (the same script behind the tab's buttons) reads, from the repo root:
 
 | File | Purpose |
 |---|---|
@@ -102,6 +114,7 @@ printf '#!/bin/sh\nagent-review || true\n' > .git/hooks/pre-commit && chmod +x .
 ```
 
 CLI: `agent-review` reviews staged changes. `agent-review --rev origin/dev..HEAD` reviews a range.
+`agent-review --rewrite FILE --mode rules|general` prints the rewritten file (what the tab diffs).
 
 ## Security model
 

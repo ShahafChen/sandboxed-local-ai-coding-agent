@@ -1,0 +1,6 @@
+# MODEL_FAMILY MODEL_PROFILE ollama-tag   (looked up by the Dockerfile; OLLAMA_MODEL overrides)
+qwen     8gb  qwen2.5-coder:7b
+qwen     16gb qwen2.5-coder:14b
+gemma    8gb  gemma3:4b
+gemma    16gb gemma3:12b
+devstral 16gb devstral-small-2:24b

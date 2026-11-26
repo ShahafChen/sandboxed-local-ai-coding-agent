@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../extension"
 fail=0
-[ "$(ls)" = "$(printf 'extension.js\npackage.json')" ] || { echo "FAIL: unexpected files: $(ls | tr '\n' ' ')"; fail=1; }
+[ "$(ls)" = "$(printf 'README.md\nextension.js\npackage.json')" ] || { echo "FAIL: unexpected files: $(ls | tr '\n' ' ')"; fail=1; }
 grep -q '"dependencies"' package.json && { echo "FAIL: package.json declares dependencies"; fail=1; }
 mods=$(grep -oE "require\('[^']+'\)" extension.js | sort -u | tr '\n' ' ')
 [ "$mods" = "require('child_process') require('crypto') require('path') require('vscode') " ] \

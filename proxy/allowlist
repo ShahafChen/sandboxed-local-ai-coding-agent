@@ -1,0 +1,4 @@
+# Hostnames (POSIX extended regex, one per line) the sandbox may reach, always over HTTPS CONNECT.
+# This is the complete list. Add a line and rebuild the proxy to allow more.
+^pypi\.org$
+^files\.pythonhosted\.org$

@@ -1,19 +1,39 @@
+# Two containers. `agent` is attached ONLY to the `sandbox` network, which is `internal`: Docker, on the
+# host, gives it no route to the outside, whatever runs inside it, root included. `proxy` is the one
+# container on both networks and the only way out: an allowlisting proxy (default: pypi only) and an
+# SSH forwarder. Set MODEL_FAMILY/MODEL_PROFILE or OLLAMA_MODEL (see config/models), or use ./up.sh.
+networks:
+  sandbox:
+    internal: true
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]
+  egress: {}
+
 services:
   agent:
     build:
       context: .
       args:
-        MODEL_FAMILY: ${MODEL_FAMILY:-qwen}
-        MODEL_PROFILE: ${MODEL_PROFILE:-8gb}
-        OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+        MODEL_FAMILY: ${MODEL_FAMILY:-qwen}        # qwen | gemma | devstral
+        MODEL_PROFILE: ${MODEL_PROFILE:-8gb}       # 8gb | 16gb (devstral: 16gb only)
+        OLLAMA_MODEL: ${OLLAMA_MODEL:-}            # any Ollama tag; overrides the two above
     image: local-ai-agent:${MODEL_FAMILY:-qwen}-${MODEL_PROFILE:-8gb}
     mem_limit: ${MEM_LIMIT:-8g}
-    cap_add: [NET_ADMIN]  # for the firewall only; the dev user never holds it
+    cap_add: [NET_ADMIN]  # for the in-container firewall only; the dev user never holds it
     security_opt: ["no-new-privileges:true"]
+    networks: [sandbox]
+    extra_hosts: ["proxy:172.30.0.2"]  # static, so the firewall and pip never need DNS
     environment:
       SSH_PUBKEY: ${SSH_PUBKEY:?export SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"}
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
-    ports:
-      - "127.0.0.1:${SSH_PORT:-2222}:22"
     volumes:
       - ${WORKSPACE:-./workspace}:/workspace
+
+  proxy:
+    build: ./proxy
+    image: local-ai-agent-proxy
+    networks:
+      sandbox: { ipv4_address: 172.30.0.2 }
+      egress: {}
+    ports:
+      - "127.0.0.1:${SSH_PORT:-2222}:2222"
